@@ -270,6 +270,14 @@ with tab3:
         else:
             new_df = pd.read_excel(batch_file)
 
+        base_required = ['monthly_salary_sar','requested_amount_or_limit_sar','requested_tenor_months',
+                          'annual_profit_rate','existing_monthly_obligations_sar','risk_score_300_900']
+        missing_base = [c for c in base_required if c not in new_df.columns]
+        if missing_base:
+            st.error(f"❌ Your uploaded file is missing these required raw columns needed before any calculation: {missing_base}.")
+            st.caption(f"Columns found in your file: {list(new_df.columns)}")
+            st.stop()
+
         new_df['total_monthly_income_sar'] = new_df['monthly_salary_sar'] + new_df.get('other_monthly_income_sar', 0)
         new_df['requested_monthly_payment_est_sar'] = (new_df['requested_amount_or_limit_sar'] * (1 + new_df['annual_profit_rate']*new_df['requested_tenor_months']/12)) / new_df['requested_tenor_months']
         new_df['policy_dbr_cap'] = 0.45
@@ -280,6 +288,13 @@ with tab3:
         salary_limit = new_df['policy_salary_multiple_cap'] * new_df['monthly_salary_sar']
         new_df['max_approvable_limit_sar'] = pd.concat([afford_limit, salary_limit], axis=1).min(axis=1)
         new_df['risk_band'] = new_df['risk_score_300_900'].apply(lambda s: 'A' if s>=700 else 'B' if s>=650 else 'C' if s>=600 else 'D' if s>=550 else 'E')
+
+        missing_cols = [c for c in ALL_FEATURES if c not in new_df.columns]
+        if missing_cols:
+            st.error(f"❌ Your uploaded file is missing these required columns: {missing_cols}. "
+                      f"Please check your column headers match the expected schema (see README) and re-upload.")
+            st.caption(f"Columns found in your file: {list(new_df.columns)}")
+            st.stop()
 
         X_batch = new_df[ALL_FEATURES].copy()
         for c in CAT_COLS:
