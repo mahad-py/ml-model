@@ -340,7 +340,7 @@ with tab3:
 
 
 
-"""
+'''
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -654,4 +654,4 @@ with tab3:
         st.dataframe(new_df[['nationality_group','city','monthly_salary_sar','requested_amount_or_limit_sar',
                               'risk_score_300_900','risk_band','ML_decision','approved_amount_sar','confidence_%']],
                      use_container_width=True)
-        st.download_button("⬇️ Download scored results (CSV)", new_df.to_csv(index=False), "scored_applicants.csv")"""
+        st.download_button("⬇️ Download scored results (CSV)", new_df.to_csv(index=False), "scored_applicants.csv")'''
