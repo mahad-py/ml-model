@@ -18,6 +18,12 @@ NUM_COLS = ['age','months_in_job','monthly_salary_sar','other_monthly_income_sar
             'annual_profit_rate','requested_monthly_payment_est_sar','policy_dbr_cap',
             'dbr_if_requested','max_affordable_new_payment_sar','policy_salary_multiple_cap',
             'max_approvable_limit_sar','risk_score_300_900']
+
+# Columns that must never be used as features — post-decision leakage
+LEAKAGE_COLS = ['approved_amount_or_limit_sar','approved_monthly_payment_est_sar',
+                'dbr_post','early_delinquency_30dpd_3m','delinquency_90dpd_12m',
+                'writeoff_18m','collections_stress_flag','decision',
+                'application_id','application_date','customer_id']
 ALL_FEATURES = CAT_COLS + NUM_COLS
 
 # ---------- THEME ----------
@@ -61,7 +67,9 @@ def load_data(file_names, sheet):
 
 @st.cache_resource(show_spinner=False)
 def train_models(df):
-    X = df[ALL_FEATURES].copy()
+    # Drop leakage and ID columns — these must never be seen by the model
+    clean = df.drop(columns=[c for c in LEAKAGE_COLS if c in df.columns], errors='ignore')
+    X = clean[ALL_FEATURES].copy()
     for c in CAT_COLS:
         X[c] = X[c].astype('category')
     y = df['decision']
