@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
+import shap
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.preprocessing import label_binarize
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -72,10 +74,29 @@ def train_models(df):
                               random_state=42, verbosity=-1)
     clf.fit(X_train, y_train, categorical_feature=CAT_COLS)
     pred = clf.predict(X_test)
+    proba_all = clf.predict_proba(X_test)
+    classes = list(clf.classes_)
+
     acc = accuracy_score(y_test, pred)
     f1 = f1_score(y_test, pred, average='macro')
 
-    # rule baseline on same test set
+    # AUC (macro OvR)
+    y_bin = label_binarize(y_test, classes=classes)
+    auc = roc_auc_score(y_bin, proba_all, multi_class='ovr', average='macro')
+
+    # Gini = 2*AUC - 1
+    gini = 2 * auc - 1
+
+    # KS statistic — use declined class probability
+    declined_idx = classes.index('declined') if 'declined' in classes else 0
+    declined_proba = proba_all[:, declined_idx]
+    actual_declined = (y_test == 'declined').astype(int).values
+    sorted_idx = np.argsort(-declined_proba)
+    cum_bad = np.cumsum(actual_declined[sorted_idx]) / actual_declined.sum()
+    cum_good = np.cumsum(1 - actual_declined[sorted_idx]) / (1 - actual_declined).sum()
+    ks = float(np.max(np.abs(cum_bad - cum_good)))
+
+    # rule baseline
     idx = X_test.index
     base = df.loc[idx]
     rule_pred = np.where(
@@ -88,7 +109,7 @@ def train_models(df):
     rule_acc = accuracy_score(y_test, rule_pred)
 
     importance = pd.Series(clf.feature_importances_, index=X.columns).sort_values(ascending=False)
-    return clf, acc, f1, rule_acc, importance
+    return clf, acc, f1, rule_acc, importance, auc, gini, ks, declined_idx
 
 if uploaded:
     df = load_data([f.name for f in uploaded], sheet_name)
@@ -97,15 +118,18 @@ if uploaded:
         st.stop()
     st.sidebar.success(f"Loaded {len(df):,} applicants from {len(uploaded)} file(s)")
     with st.spinner("Training decision model on uploaded data..."):
-        clf, acc, f1, rule_acc, importance = train_models(df)
+        clf, acc, f1, rule_acc, importance, auc, gini, ks, declined_idx = train_models(df)
     st.sidebar.metric("Model accuracy (holdout)", f"{acc*100:.2f}%")
     st.sidebar.metric("Policy-rule baseline", f"{rule_acc*100:.2f}%")
+    st.sidebar.metric("Gini coefficient", f"{gini*100:.1f}%")
+    st.sidebar.metric("AUC-ROC", f"{auc:.3f}")
+    st.sidebar.metric("KS Statistic", f"{ks*100:.1f}%")
     st.sidebar.caption(f"Model lift over hardcoded rule: **{(acc-rule_acc)*100:+.2f}pp**")
 else:
     st.info("👈 Upload the historical applicant dataset (.xlsx) in the sidebar to train the model and unlock the demo.")
     st.stop()
 
-tab1, tab2, tab3 = st.tabs(["📊 Pattern Analysis", "🧪 Score a New Applicant", "📁 Batch Scoring"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Pattern Analysis", "🧪 Score a New Applicant", "📁 Batch Scoring", "🎯 ML Risk Scoring"])
 
 # ============================================================
 # TAB 1: PATTERN ANALYSIS
@@ -116,6 +140,11 @@ with tab1:
     c2.metric("Approval rate", f"{(df['decision']!='declined').mean()*100:.1f}%")
     c3.metric("Model accuracy", f"{acc*100:.2f}%")
     c4.metric("Exceptions caught", f"{int((acc-rule_acc)*len(df)*0.2):,}")
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Gini Coefficient", f"{gini*100:.1f}%", help="How well the model separates good vs bad applicants. 60%+ is strong.")
+    m2.metric("AUC-ROC", f"{auc:.3f}", help="Ranking ability — does higher risk score mean higher actual risk? 0.85+ is strong.")
+    m3.metric("KS Statistic", f"{ks*100:.1f}%", help="Maximum separation between approved and declined distributions. 30%+ is acceptable, 50%+ is strong.")
 
     colA, colB = st.columns(2)
     with colA:
@@ -227,6 +256,8 @@ with tab2:
         pred = clf.predict(X_new)[0]
         proba = clf.predict_proba(X_new)[0]
         confidence = proba.max() * 100
+        ml_risk_score = round(float(proba[declined_idx]) * 100, 1)
+        risk_label = "🟢 Low Risk" if ml_risk_score <= 33 else "🟡 Medium Risk" if ml_risk_score <= 66 else "🔴 High Risk"
 
         # rule baseline for comparison / exception flag
         rule_pred = 'declined'
@@ -236,7 +267,7 @@ with tab2:
         approved_amount = 0 if pred == 'declined' else min(requested_amount_or_limit_sar, max_approvable_limit)
 
         st.divider()
-        r1, r2, r3 = st.columns(3)
+        r1, r2, r3, r4 = st.columns(4)
         with r1:
             color = {"approved_full": "🟢", "approved_reduced": "🟡", "declined": "🔴"}[pred]
             st.markdown(f"### {color} Decision: **{pred.replace('_',' ').title()}**")
@@ -249,6 +280,10 @@ with tab2:
         with r3:
             st.markdown(f"### 📈 Risk Band: **{risk_band}**")
             st.caption(f"Score: {risk_score_300_900} / 900")
+        with r4:
+            st.markdown(f"### 🎯 ML Risk Score")
+            st.markdown(f"## {ml_risk_score} / 100")
+            st.caption(risk_label)
 
         st.divider()
         st.subheader("Review & Pattern Flags")
@@ -270,6 +305,100 @@ with tab2:
 
         with st.expander("See calculated policy fields used by the model"):
             st.dataframe(row[['dbr_if_requested','max_affordable_new_payment_sar','max_approvable_limit_sar','risk_band']].T.rename(columns={0: 'value'}))
+
+        with st.expander("🔍 Why did the model make this decision? (SHAP Explanation)"):
+            try:
+                explainer = shap.TreeExplainer(clf)
+                shap_vals = explainer.shap_values(X_new)
+                declined_class_idx = declined_idx
+                if isinstance(shap_vals, list):
+                    sv = shap_vals[declined_class_idx][0]
+                else:
+                    sv = shap_vals[0]
+                shap_df = pd.DataFrame({
+                    'Feature': ALL_FEATURES,
+                    'SHAP Value': sv,
+                    'Impact': np.abs(sv)
+                }).sort_values('Impact', ascending=False).head(5)
+                shap_df['Direction'] = shap_df['SHAP Value'].apply(lambda x: '🔴 Increases risk' if x > 0 else '🟢 Reduces risk')
+                st.caption("Top 5 factors driving this applicant's risk score:")
+                st.dataframe(shap_df[['Feature','Direction','Impact']].reset_index(drop=True), use_container_width=True)
+            except Exception as e:
+                st.caption(f"SHAP explanation unavailable: {e}")
+
+# ============================================================
+# TAB 4: ML RISK SCORING
+# ============================================================
+with tab4:
+    st.subheader("🎯 ML Risk Scoring Layer")
+    st.caption("Upload a batch of applicants. The model produces an ML Risk Score (0–100) for each one as an additional layer alongside any existing rule-based decision.")
+
+    risk_file = st.file_uploader("Upload applicants file (CSV or XLSX)", type=["csv","xlsx"], key="risk")
+
+    if risk_file is not None:
+        rdf = pd.read_csv(risk_file) if risk_file.name.endswith(".csv") else pd.read_excel(risk_file)
+
+        # derive policy fields
+        rdf['total_monthly_income_sar'] = rdf['monthly_salary_sar'] + rdf.get('other_monthly_income_sar', 0)
+        rdf['requested_monthly_payment_est_sar'] = (rdf['requested_amount_or_limit_sar'] * (1 + rdf['annual_profit_rate']*rdf['requested_tenor_months']/12)) / rdf['requested_tenor_months']
+        rdf['policy_dbr_cap'] = 0.45
+        rdf['policy_salary_multiple_cap'] = 15
+        rdf['dbr_if_requested'] = (rdf['existing_monthly_obligations_sar'] + rdf['requested_monthly_payment_est_sar']) / rdf['total_monthly_income_sar']
+        rdf['max_affordable_new_payment_sar'] = (0.45*rdf['total_monthly_income_sar'] - rdf['existing_monthly_obligations_sar']).clip(lower=0)
+        afford_lim = rdf['max_affordable_new_payment_sar'] * rdf['requested_tenor_months'] / (1 + rdf['annual_profit_rate']*rdf['requested_tenor_months']/12)
+        sal_lim = 15 * rdf['monthly_salary_sar']
+        rdf['max_approvable_limit_sar'] = pd.concat([afford_lim, sal_lim], axis=1).min(axis=1)
+        rdf['risk_band'] = rdf['risk_score_300_900'].apply(lambda s: 'A' if s>=700 else 'B' if s>=650 else 'C' if s>=600 else 'D' if s>=550 else 'E')
+
+        missing = [c for c in ALL_FEATURES if c not in rdf.columns]
+        if missing:
+            st.error(f"Missing columns: {missing}")
+            st.stop()
+
+        X_r = rdf[ALL_FEATURES].copy()
+        for c in CAT_COLS:
+            X_r[c] = X_r[c].astype('category').cat.set_categories(df[c].astype('category').cat.categories)
+
+        proba_r = clf.predict_proba(X_r)
+        rdf['ml_risk_score'] = (proba_r[:, declined_idx] * 100).round(1)
+        rdf['risk_label'] = rdf['ml_risk_score'].apply(lambda s: 'Low Risk' if s<=33 else 'Medium Risk' if s<=66 else 'High Risk')
+        rdf['ml_decision'] = clf.predict(X_r)
+
+        # rule decision
+        rdf['rule_decision'] = np.where(
+            rdf['nafath_verified']==0, 'declined',
+            np.where((rdf['risk_score_300_900']>=560)&(rdf['max_approvable_limit_sar']>0),
+                     np.where(rdf['requested_amount_or_limit_sar']<=rdf['max_approvable_limit_sar'],'approved_full','approved_reduced'),
+                     'declined')
+        )
+        # flag where ML and rule disagree meaningfully
+        rdf['ml_vs_rule_flag'] = np.where(
+            (rdf['rule_decision']!='declined') & (rdf['ml_risk_score']>66), '🚩 Approved by rule but HIGH ML risk',
+            np.where((rdf['rule_decision']=='declined') & (rdf['ml_risk_score']<33), '⚠️ Declined by rule but LOW ML risk', '✅ Rule and ML agree')
+        )
+
+        st.success(f"Scored {len(rdf):,} applicants")
+
+        # summary metrics
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Low Risk", int((rdf['risk_label']=='Low Risk').sum()))
+        s2.metric("Medium Risk", int((rdf['risk_label']=='Medium Risk').sum()))
+        s3.metric("High Risk", int((rdf['risk_label']=='High Risk').sum()))
+        s4.metric("Flags raised", int((rdf['ml_vs_rule_flag']!='✅ Rule and ML agree').sum()))
+
+        # risk score distribution
+        fig_r = px.histogram(rdf, x='ml_risk_score', nbins=20, title="ML Risk Score Distribution",
+                              color_discrete_sequence=['#2e6ed8'])
+        st.plotly_chart(fig_r, use_container_width=True)
+
+        # results table
+        display_cols = []
+        if 'application_id' in rdf.columns: display_cols.append('application_id')
+        display_cols += ['nationality_group','city','monthly_salary_sar','risk_score_300_900',
+                         'risk_band','rule_decision','ml_risk_score','risk_label','ml_vs_rule_flag']
+        display_cols = [c for c in display_cols if c in rdf.columns]
+        st.dataframe(rdf[display_cols], use_container_width=True)
+        st.download_button("⬇️ Download ML Risk Scores (CSV)", rdf.to_csv(index=False), "ml_risk_scores.csv")
 
 # ============================================================
 # TAB 3: BATCH SCORING
@@ -327,5 +456,3 @@ with tab3:
                               'risk_score_300_900','risk_band','ML_decision','approved_amount_sar','confidence_%']],
                      use_container_width=True)
         st.download_button("⬇️ Download scored results (CSV)", new_df.to_csv(index=False), "scored_applicants.csv")
-
-
