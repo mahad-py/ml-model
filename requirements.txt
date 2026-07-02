@@ -5,3 +5,4 @@ lightgbm
 scikit-learn
 plotly
 openpyxl
+shap
