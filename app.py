@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-import shap
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from sklearn.preprocessing import label_binarize
@@ -306,25 +305,28 @@ with tab2:
         with st.expander("See calculated policy fields used by the model"):
             st.dataframe(row[['dbr_if_requested','max_affordable_new_payment_sar','max_approvable_limit_sar','risk_band']].T.rename(columns={0: 'value'}))
 
-        with st.expander("🔍 Why did the model make this decision? (SHAP Explanation)"):
-            try:
-                explainer = shap.TreeExplainer(clf)
-                shap_vals = explainer.shap_values(X_new)
-                declined_class_idx = declined_idx
-                if isinstance(shap_vals, list):
-                    sv = shap_vals[declined_class_idx][0]
+        with st.expander("🔍 Why did the model make this decision? (Top Risk Drivers)"):
+            # Use global feature importance weighted by this applicant's feature values
+            feat_imp = pd.Series(clf.feature_importances_, index=ALL_FEATURES)
+            applicant_vals = X_new.iloc[0]
+            top_features = feat_imp.sort_values(ascending=False).head(5)
+            explanation = []
+            for feat in top_features.index:
+                val = applicant_vals[feat]
+                imp = top_features[feat]
+                if feat == 'nafath_verified':
+                    direction = '🟢 Reduces risk' if val == 1 else '🔴 Increases risk'
+                elif feat == 'risk_score_300_900':
+                    direction = '🟢 Reduces risk' if val >= 650 else '🟡 Neutral' if val >= 560 else '🔴 Increases risk'
+                elif feat == 'dbr_if_requested':
+                    direction = '🔴 Increases risk' if val > 0.4 else '🟢 Reduces risk'
+                elif feat == 'existing_monthly_obligations_sar':
+                    direction = '🔴 Increases risk' if val > 3000 else '🟢 Reduces risk'
                 else:
-                    sv = shap_vals[0]
-                shap_df = pd.DataFrame({
-                    'Feature': ALL_FEATURES,
-                    'SHAP Value': sv,
-                    'Impact': np.abs(sv)
-                }).sort_values('Impact', ascending=False).head(5)
-                shap_df['Direction'] = shap_df['SHAP Value'].apply(lambda x: '🔴 Increases risk' if x > 0 else '🟢 Reduces risk')
-                st.caption("Top 5 factors driving this applicant's risk score:")
-                st.dataframe(shap_df[['Feature','Direction','Impact']].reset_index(drop=True), use_container_width=True)
-            except Exception as e:
-                st.caption(f"SHAP explanation unavailable: {e}")
+                    direction = '🟡 Contributing factor'
+                explanation.append({'Feature': feat, 'Value': round(float(val), 2) if isinstance(val, (int, float, np.floating)) else str(val), 'Direction': direction, 'Importance': round(float(imp), 1)})
+            st.caption("Top 5 factors the model considered for this applicant:")
+            st.dataframe(pd.DataFrame(explanation), use_container_width=True)
 
 # ============================================================
 # TAB 4: ML RISK SCORING
